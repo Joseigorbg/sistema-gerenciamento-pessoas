@@ -462,5 +462,30 @@ export const storageApi = {
       throw new Error('URL de arquivo inválida');
     }
     
-    const response = await fetch(`${SUPABAS
-(Content truncated due to size limit. Use line ranges to read in chunks)
+    const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${filePath}`, {
+      method: 'DELETE',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (!response.ok && response.status !== 200) { // DELETE retorna 200 com corpo ou 204 sem corpo
+        const errorData = await response.json().catch(() => ({ message: response.statusText }));
+        // Ignora erro 404 (arquivo não encontrado) pois o objetivo é excluir
+        if (response.status !== 404) {
+             throw new Error(`Erro ao excluir foto: ${errorData.message || response.statusText}`);
+        }
+    }
+  },
+};
+
+// Exporta todas as APIs
+export const supabaseApi = {
+  pessoas: pessoasApi,
+  auth: authApi,
+  storage: storageApi,
+};
+
+export default supabaseApi;
+
