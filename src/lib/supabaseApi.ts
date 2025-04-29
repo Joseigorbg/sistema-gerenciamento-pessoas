@@ -324,8 +324,10 @@ export const authApi = {
   },
   
   // Cadastro de novo usuário
+  // Cadastro de novo usuário
   cadastrar: async (email: string, senha: string): Promise<{
-    user: { id: string; email: string };
+    // Mudamos o tipo de retorno para permitir user ser null
+    user: { id: string; email: string } | null; 
     session: null;
   }> => {
     const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
@@ -345,21 +347,26 @@ export const authApi = {
       throw new Error(data.msg || data.message || `Erro ao cadastrar usuário: ${response.statusText}`);
     }
     
-    // Verifica se a resposta contém o objeto 'user' e suas propriedades esperadas
+    // Verifica se a resposta contém o objeto 'user' e suas propriedades
+    // Se não contiver (comum com confirmação de email), retorna user como null
     if (!data || !data.user || !data.user.id || !data.user.email) {
-      // Se a resposta for OK mas não contiver os dados esperados, lança um erro
-      // Isso pode acontecer se a confirmação de email estiver habilitada e o Supabase não retornar o usuário imediatamente
-      console.warn('Cadastro iniciado, mas dados do usuário não retornados imediatamente (pode exigir confirmação de email).');
-      // Retorna um objeto indicando sucesso parcial ou necessidade de confirmação
-      // Ou lança um erro, dependendo de como você quer lidar com isso no frontend
-      // throw new Error('Resposta inesperada do servidor após cadastro.'); 
-      // Por ora, vamos retornar um objeto com ID e email vazios para evitar o erro 'reading id'
-      // O frontend já exibe a mensagem para verificar o email.
+      console.warn('Cadastro iniciado, mas dados do usuário não retornados (provavelmente requer confirmação de email).');
       return {
-        user: { id: '', email: '' }, // Retorna objeto vazio para evitar erro
+        user: null, // Retorna null para indicar que o usuário não foi retornado
         session: null,
       };
     }
+    
+    // Se tudo deu certo e os dados estão presentes
+    return {
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+      },
+      session: null, // Cadastro não gera sessão automaticamente
+    };
+  },
+
     
     // Se tudo deu certo e os dados estão presentes
     return {
