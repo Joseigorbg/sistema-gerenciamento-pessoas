@@ -29,6 +29,9 @@ const getAuthHeaders = (token?: string) => {
 
 // Headers para operações administrativas (usando service role key)
 const getServiceHeaders = () => {
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('SUPABASE_SERVICE_ROLE_KEY não definida. Usando ANON_KEY para operações de serviço.');
+  }
   return {
     'apikey': SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY}`,
@@ -92,61 +95,61 @@ export const pessoasApi = {
     });
     
     if (!response.ok) {
-      throw new Error(`Erro ao listar pessoas: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao listar pessoas: ${errorData.message || response.statusText}`);
     }
     
     return response.json();
   },
   
   // Obter uma pessoa pelo ID
-  obterPorId: async (id: string, token?: string): Promise<Pessoa> => {
+  obterPorId: async (id: string, token?: string): Promise<Pessoa | null> => {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/pessoas?id=eq.${id}&select=*`, {
       headers: getAuthHeaders(token),
     });
     
     if (!response.ok) {
-      throw new Error(`Erro ao obter pessoa: ${response.statusText}`);
+      if (response.status === 404) return null; // Não encontrado
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao obter pessoa: ${errorData.message || response.statusText}`);
     }
     
     const data = await response.json();
-    return data[0];
+    return data[0] || null;
   },
   
   // Criar uma nova pessoa
   criar: async (pessoa: Pessoa, token?: string): Promise<Pessoa> => {
-    // Adiciona o ID do usuário atual como cadastrante_id se não for fornecido
-    if (!pessoa.cadastrante_id && token) {
-      // Em uma implementação real, extrairíamos o user_id do token JWT
-      // Por enquanto, isso seria feito no frontend
-    }
-    
     const response = await fetch(`${SUPABASE_URL}/rest/v1/pessoas`, {
       method: 'POST',
-      headers: getAuthHeaders(token),
+      headers: { ...getAuthHeaders(token), Prefer: 'return=representation' }, // Adiciona Prefer para retornar o objeto criado
       body: JSON.stringify(pessoa),
     });
     
-    if (!response.ok) {
-      throw new Error(`Erro ao criar pessoa: ${response.statusText}`);
+    if (!response.ok || response.status !== 201) {
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao criar pessoa: ${errorData.message || response.statusText}`);
     }
     
-    return response.json();
+    const data = await response.json();
+    return data[0]; // Retorna o primeiro (e único) objeto do array
   },
   
   // Atualizar uma pessoa existente
   atualizar: async (id: string, pessoa: Partial<Pessoa>, token?: string): Promise<Pessoa> => {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/pessoas?id=eq.${id}`, {
       method: 'PATCH',
-      headers: getAuthHeaders(token),
+      headers: { ...getAuthHeaders(token), Prefer: 'return=representation' }, // Adiciona Prefer para retornar o objeto atualizado
       body: JSON.stringify(pessoa),
     });
     
     if (!response.ok) {
-      throw new Error(`Erro ao atualizar pessoa: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao atualizar pessoa: ${errorData.message || response.statusText}`);
     }
     
-    // Supabase PATCH não retorna o objeto atualizado, então precisamos buscá-lo
-    return pessoasApi.obterPorId(id, token);
+    const data = await response.json();
+    return data[0];
   },
   
   // Excluir uma pessoa
@@ -156,8 +159,9 @@ export const pessoasApi = {
       headers: getAuthHeaders(token),
     });
     
-    if (!response.ok) {
-      throw new Error(`Erro ao excluir pessoa: ${response.statusText}`);
+    if (!response.ok && response.status !== 204) { // 204 No Content é sucesso para DELETE
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao excluir pessoa: ${errorData.message || response.statusText}`);
     }
   },
   
@@ -166,7 +170,7 @@ export const pessoasApi = {
     id: string, 
     status: 'Aprovado' | 'Rejeitado', 
     aprovadorId: string,
-    token?: string
+    token?: string // Token do admin logado (para buscar o objeto atualizado)
   ): Promise<Pessoa> => {
     const atualizacao = {
       status_aprovacao: status,
@@ -174,18 +178,19 @@ export const pessoasApi = {
       data_aprovacao: new Date().toISOString(),
     };
     
-    // Usa o service role key para garantir que a operação seja permitida
     const response = await fetch(`${SUPABASE_URL}/rest/v1/pessoas?id=eq.${id}`, {
       method: 'PATCH',
-      headers: getServiceHeaders(),
+      headers: { ...getServiceHeaders(), Prefer: 'return=representation' }, // Usa service key e retorna o objeto
       body: JSON.stringify(atualizacao),
     });
     
     if (!response.ok) {
-      throw new Error(`Erro ao ${status === 'Aprovado' ? 'aprovar' : 'rejeitar'} cadastro: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao ${status === 'Aprovado' ? 'aprovar' : 'rejeitar'} cadastro: ${errorData.message || response.statusText}`);
     }
     
-    return pessoasApi.obterPorId(id, token);
+    const data = await response.json();
+    return data[0];
   },
   
   // Obter estatísticas para o dashboard
@@ -197,44 +202,26 @@ export const pessoasApi = {
     aprovados: number;
     rejeitados: number;
   }> => {
-    // Esta é uma implementação simplificada que faz múltiplas chamadas
-    // Em uma implementação real, poderíamos usar uma função RPC no Supabase
-    
-    const [todas, ativas, inativas, pendentes, aprovadas, rejeitadas] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?select=count`, {
+    const fetchCount = async (filter: string = '') => {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/pessoas?${filter}&select=count`, {
         method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?status=eq.Ativo&select=count`, {
-        method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?status=eq.Inativo&select=count`, {
-        method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?status_aprovacao=eq.Pendente&select=count`, {
-        method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?status_aprovacao=eq.Aprovado&select=count`, {
-        method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
-      fetch(`${SUPABASE_URL}/rest/v1/pessoas?status_aprovacao=eq.Rejeitado&select=count`, {
-        method: 'HEAD',
-        headers: getAuthHeaders(token),
-      }),
+        headers: { ...getAuthHeaders(token), 'Range-Unit': 'items' }, // Range-Unit é necessário para HEAD com count
+      });
+      if (!response.ok) return 0;
+      const range = response.headers.get('content-range');
+      return parseInt(range?.split('/')[1] || '0');
+    };
+
+    const [total, ativos, inativos, pendentes, aprovados, rejeitados] = await Promise.all([
+      fetchCount(),
+      fetchCount('status=eq.Ativo'),
+      fetchCount('status=eq.Inativo'),
+      fetchCount('status_aprovacao=eq.Pendente'),
+      fetchCount('status_aprovacao=eq.Aprovado'),
+      fetchCount('status_aprovacao=eq.Rejeitado'),
     ]);
     
-    return {
-      total: parseInt(todas.headers.get('content-range')?.split('/')[1] || '0'),
-      ativos: parseInt(ativas.headers.get('content-range')?.split('/')[1] || '0'),
-      inativos: parseInt(inativas.headers.get('content-range')?.split('/')[1] || '0'),
-      pendentes: parseInt(pendentes.headers.get('content-range')?.split('/')[1] || '0'),
-      aprovados: parseInt(aprovadas.headers.get('content-range')?.split('/')[1] || '0'),
-      rejeitados: parseInt(rejeitadas.headers.get('content-range')?.split('/')[1] || '0'),
-    };
+    return { total, ativos, inativos, pendentes, aprovados, rejeitados };
   },
   
   // Obter dados para o mapa (locais com cadastros aprovados)
@@ -243,8 +230,6 @@ export const pessoasApi = {
     longitude: number;
     quantidade: number;
   }[]> => {
-    // Em uma implementação real, usaríamos uma função SQL no Supabase para agrupar por localização
-    // Aqui, vamos apenas buscar todos os cadastros aprovados com localização
     const response = await fetch(
       `${SUPABASE_URL}/rest/v1/pessoas?status_aprovacao=eq.Aprovado&select=latitude,longitude&not.latitude=is.null&not.longitude=is.null`,
       {
@@ -253,16 +238,16 @@ export const pessoasApi = {
     );
     
     if (!response.ok) {
-      throw new Error(`Erro ao obter dados para mapa: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao obter dados para mapa: ${errorData.message || response.statusText}`);
     }
     
-    const data = await response.json();
+    const data: { latitude: number; longitude: number }[] = await response.json();
     
-    // Agrupar por coordenadas (simplificado)
     const locais: Record<string, { latitude: number; longitude: number; quantidade: number }> = {};
     
-    data.forEach((item: { latitude: number; longitude: number }) => {
-      // Arredonda para 2 casas decimais para agrupar locais próximos
+    data.forEach((item) => {
+      if (typeof item.latitude !== 'number' || typeof item.longitude !== 'number') return;
       const lat = Math.round(item.latitude * 100) / 100;
       const lng = Math.round(item.longitude * 100) / 100;
       const key = `${lat},${lng}`;
@@ -270,32 +255,28 @@ export const pessoasApi = {
       if (!locais[key]) {
         locais[key] = { latitude: lat, longitude: lng, quantidade: 0 };
       }
-      
       locais[key].quantidade += 1;
     });
     
     return Object.values(locais);
   },
   
-  // Obter aniversariantes do mês atual
+  // Obter aniversariantes do mês atual (usando RPC)
   obterAniversariantesMes: async (token?: string): Promise<Pessoa[]> => {
-    const mesAtual = new Date().getMonth() + 1; // getMonth() retorna 0-11
-    
-    // Filtra por mês de aniversário (usando função EXTRACT do PostgreSQL via API)
+    const mesAtual = new Date().getMonth() + 1;
     const response = await fetch(
       `${SUPABASE_URL}/rest/v1/rpc/obter_aniversariantes_mes`,
       {
         method: 'POST',
         headers: getAuthHeaders(token),
-        body: JSON.stringify({ mes: mesAtual }),
+        body: JSON.stringify({ p_mes: mesAtual }), // Nome do parâmetro conforme definido na função RPC
       }
     );
     
     if (!response.ok) {
-      // Fallback caso a função RPC não exista
-      console.error('Função RPC não disponível, implementando fallback');
-      // Implementação alternativa seria buscar todas as pessoas e filtrar no cliente
-      // Mas isso seria ineficiente para grandes volumes de dados
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      console.error('Erro ao chamar RPC obter_aniversariantes_mes:', errorData.message || response.statusText);
+      // Fallback: Retorna array vazio em caso de erro na RPC
       return [];
     }
     
@@ -319,12 +300,16 @@ export const authApi = {
       body: JSON.stringify({ email, password: senha }),
     });
     
+    const data = await response.json();
+
     if (!response.ok) {
-      throw new Error(`Erro ao fazer login: ${response.statusText}`);
+      throw new Error(data.error_description || `Erro ao fazer login: ${response.statusText}`);
     }
     
-    const data = await response.json();
-    
+    if (!data.user || !data.access_token || !data.refresh_token) {
+      throw new Error('Resposta inválida do servidor de autenticação.');
+    }
+
     return {
       user: {
         id: data.user.id,
@@ -352,18 +337,37 @@ export const authApi = {
       body: JSON.stringify({ email, password: senha }),
     });
     
+    const data = await response.json();
+
+    // Verifica se a resposta foi OK (status 2xx)
     if (!response.ok) {
-      throw new Error(`Erro ao cadastrar usuário: ${response.statusText}`);
+      // Se não foi OK, lança um erro com a mensagem do Supabase ou o statusText
+      throw new Error(data.msg || data.message || `Erro ao cadastrar usuário: ${response.statusText}`);
     }
     
-    const data = await response.json();
+    // Verifica se a resposta contém o objeto 'user' e suas propriedades esperadas
+    if (!data || !data.user || !data.user.id || !data.user.email) {
+      // Se a resposta for OK mas não contiver os dados esperados, lança um erro
+      // Isso pode acontecer se a confirmação de email estiver habilitada e o Supabase não retornar o usuário imediatamente
+      console.warn('Cadastro iniciado, mas dados do usuário não retornados imediatamente (pode exigir confirmação de email).');
+      // Retorna um objeto indicando sucesso parcial ou necessidade de confirmação
+      // Ou lança um erro, dependendo de como você quer lidar com isso no frontend
+      // throw new Error('Resposta inesperada do servidor após cadastro.'); 
+      // Por ora, vamos retornar um objeto com ID e email vazios para evitar o erro 'reading id'
+      // O frontend já exibe a mensagem para verificar o email.
+      return {
+        user: { id: '', email: '' }, // Retorna objeto vazio para evitar erro
+        session: null,
+      };
+    }
     
+    // Se tudo deu certo e os dados estão presentes
     return {
       user: {
         id: data.user.id,
         email: data.user.email,
       },
-      session: null, // Normalmente, o usuário precisa confirmar o email antes de obter uma sessão
+      session: null, // Cadastro não gera sessão automaticamente
     };
   },
   
@@ -378,8 +382,9 @@ export const authApi = {
       },
     });
     
-    if (!response.ok) {
-      throw new Error(`Erro ao fazer logout: ${response.statusText}`);
+    if (!response.ok && response.status !== 204) { // 204 No Content é sucesso
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao fazer logout: ${errorData.message || response.statusText}`);
     }
   },
   
@@ -395,10 +400,14 @@ export const authApi = {
     });
     
     if (!response.ok) {
-      return { user: null };
+      return { user: null }; // Token inválido ou expirado
     }
     
     const data = await response.json();
+
+    if (!data || !data.id || !data.email) {
+        return { user: null }; // Resposta inesperada
+    }
     
     return {
       user: {
@@ -418,11 +427,9 @@ export const storageApi = {
     file: File,
     token: string
   ): Promise<{ url: string }> => {
-    // Cria um nome de arquivo único baseado no ID do usuário
     const fileName = `${userId}_${Date.now()}.${file.name.split('.').pop()}`;
     const filePath = `fotos_perfil/${fileName}`;
     
-    // Faz o upload do arquivo para o bucket 'fotos_perfil'
     const response = await fetch(`${SUPABASE_URL}/storage/v1/object/fotos_perfil/${filePath}`, {
       method: 'POST',
       headers: {
@@ -430,15 +437,18 @@ export const storageApi = {
         'Authorization': `Bearer ${token}`,
         'Content-Type': file.type,
         'Cache-Control': '3600',
+        'x-upsert': 'true' // Permite sobrescrever se o arquivo já existir (opcional)
       },
       body: file,
     });
     
     if (!response.ok) {
-      throw new Error(`Erro ao fazer upload da foto: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(`Erro ao fazer upload da foto: ${errorData.message || response.statusText}`);
     }
     
     // Retorna a URL pública do arquivo
+    // Certifique-se de que o bucket 'fotos_perfil' está configurado como público no Supabase
     return {
       url: `${SUPABASE_URL}/storage/v1/object/public/fotos_perfil/${filePath}`,
     };
@@ -446,32 +456,11 @@ export const storageApi = {
   
   // Excluir foto de perfil
   excluirFotoPerfil: async (url: string, token: string): Promise<void> => {
-    // Extrai o caminho do arquivo da URL
     const filePath = url.split('/public/')[1];
     
     if (!filePath) {
       throw new Error('URL de arquivo inválida');
     }
     
-    const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${filePath}`, {
-      method: 'DELETE',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Erro ao excluir foto: ${response.statusText}`);
-    }
-  },
-};
-
-// Exporta todas as APIs
-export const supabaseApi = {
-  pessoas: pessoasApi,
-  auth: authApi,
-  storage: storageApi,
-};
-
-export default supabaseApi;
+    const response = await fetch(`${SUPABAS
+(Content truncated due to size limit. Use line ranges to read in chunks)
